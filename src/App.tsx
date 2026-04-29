@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { generatePuzzle, evaluateAnswer, Puzzle, EvaluationResult } from './services/geminiService';
-import { Terminal, Activity, Cpu, Hexagon, Cloud, Anchor, CheckCircle, XCircle, ArrowRight, Loader2 } from 'lucide-react';
+import { Terminal, Activity, Cpu, Hexagon, Cloud, Anchor, CheckCircle, XCircle, ArrowRight, Loader2, Lock, Unlock, Timer, Clock, Flame } from 'lucide-react';
 
 const DISCIPLINES = [
   { id: 'Software', icon: Terminal, color: 'text-green-400' },
@@ -10,57 +10,163 @@ const DISCIPLINES = [
   { id: 'DevOps', icon: Cloud, color: 'text-purple-400' },
 ];
 
+const SUB_DOMAINS: Record<string, { id: string; label: string }[]> = {
+  Software: [
+    { id: 'Algorithms & Data Structures', label: 'Algorithms & DS' },
+    { id: 'Systems Programming', label: 'Systems' },
+    { id: 'Debugging', label: 'Debugging' },
+    { id: 'Security', label: 'Security' },
+    { id: 'Database & SQL', label: 'Database / SQL' },
+    { id: 'Networking', label: 'Networking' },
+  ],
+  Electronics: [
+    { id: 'Digital Logic', label: 'Digital Logic' },
+    { id: 'Analog Circuits', label: 'Analog Circuits' },
+    { id: 'Embedded Systems', label: 'Embedded' },
+    { id: 'Signal Processing', label: 'Signal Processing' },
+    { id: 'PCB & Fault Diagnosis', label: 'PCB / Faults' },
+  ],
+};
+
+const LANGUAGES = ['Python', 'C', 'C++', 'Rust', 'Go', 'JavaScript', 'TypeScript', 'Java', 'SQL'];
+
+const QUESTION_TYPE_STYLES: Record<string, { label: string; color: string }> = {
+  'root-cause': { label: 'Root Cause', color: 'text-[#F87171] bg-[#F87171]/10 border-[#F87171]/30' },
+  'code-review': { label: 'Code Review', color: 'text-[#60A5FA] bg-[#60A5FA]/10 border-[#60A5FA]/30' },
+  'math': { label: 'Math', color: 'text-[#C084FC] bg-[#C084FC]/10 border-[#C084FC]/30' },
+  'design': { label: 'Design', color: 'text-[#22D3EE] bg-[#22D3EE]/10 border-[#22D3EE]/30' },
+  'trace': { label: 'Trace', color: 'text-[#FBBF24] bg-[#FBBF24]/10 border-[#FBBF24]/30' },
+  'exploit': { label: 'Exploit', color: 'text-[#F97316] bg-[#F97316]/10 border-[#F97316]/30' },
+};
+
+type TimerMode = 'none' | 'countdown' | 'stopwatch';
+
+function formatTime(ms: number): string {
+  const totalSecs = Math.floor(ms / 1000);
+  const m = Math.floor(totalSecs / 60);
+  const s = totalSecs % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
 export default function App() {
   const [activeDiscipline, setActiveDiscipline] = useState<string>(DISCIPLINES[0].id);
+  const [activeSubDomain, setActiveSubDomain] = useState<string | null>(null);
+  const [activeLanguage, setActiveLanguage] = useState<string | null>(null);
+
   const [difficulty, setDifficulty] = useState<number>(3);
+  const [difficultyPinned, setDifficultyPinned] = useState<boolean>(false);
   const [score, setScore] = useState<number>(0);
-  
+  const [streak, setStreak] = useState<number>(0);
+  const [bestStreak, setBestStreak] = useState<number>(0);
+
   const [currentPuzzle, setCurrentPuzzle] = useState<Puzzle | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [userAnswer, setUserAnswer] = useState<string>('');
-  
   const [evalResult, setEvalResult] = useState<EvaluationResult | null>(null);
   const [evaluating, setEvaluating] = useState<boolean>(false);
 
-  const loadPuzzle = async (discipline: string, diff: number) => {
+  const [timerMode, setTimerMode] = useState<TimerMode>('none');
+  const [countdownDuration, setCountdownDuration] = useState<30 | 60 | 90>(60);
+  const [timeLeft, setTimeLeft] = useState<number | null>(null);
+  const [elapsedMs, setElapsedMs] = useState<number>(0);
+  const [timeHistory, setTimeHistory] = useState<number[]>([]);
+
+  const timedOutRef = useRef(false);
+
+  // Start timer when a new puzzle loads
+  useEffect(() => {
+    if (!currentPuzzle || timerMode === 'none') return;
+    timedOutRef.current = false;
+    if (timerMode === 'countdown') {
+      setTimeLeft(countdownDuration);
+    } else {
+      setElapsedMs(0);
+    }
+  }, [currentPuzzle]); // intentionally omitting timerMode/countdownDuration — changes take effect on next puzzle
+
+  // Countdown tick
+  useEffect(() => {
+    if (timerMode !== 'countdown' || timeLeft === null || !!evalResult) return;
+    if (timeLeft === 0) {
+      if (!timedOutRef.current) {
+        timedOutRef.current = true;
+        setEvalResult({ isCorrect: false, feedback: "Time's up — the clock ran out before you could submit. No points awarded." });
+        if (!difficultyPinned) setDifficulty(d => Math.max(1, d - 1));
+        setStreak(0);
+      }
+      return;
+    }
+    const id = setTimeout(() => setTimeLeft(t => t !== null ? t - 1 : null), 1000);
+    return () => clearTimeout(id);
+  }, [timeLeft, evalResult, timerMode, difficultyPinned]);
+
+  // Stopwatch tick
+  useEffect(() => {
+    if (timerMode !== 'stopwatch' || !currentPuzzle || isLoading || !!evalResult) return;
+    const id = setInterval(() => setElapsedMs(t => t + 100), 100);
+    return () => clearInterval(id);
+  }, [timerMode, currentPuzzle, isLoading, evalResult]);
+
+  const loadPuzzle = async (
+    discipline: string,
+    diff: number,
+    subDomain?: string | null,
+    language?: string | null
+  ) => {
+    timedOutRef.current = false;
     setIsLoading(true);
     setEvalResult(null);
     setUserAnswer('');
+    setTimeLeft(null);
+    setElapsedMs(0);
     try {
-      const p = await generatePuzzle(discipline, diff);
+      const p = await generatePuzzle(discipline, diff, {
+        subDomain: subDomain ?? undefined,
+        language: language ?? undefined,
+      });
       setCurrentPuzzle(p);
     } catch (e) {
       console.error(e);
-      // Fallback puzzle or error state
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Initial load
   useEffect(() => {
-    loadPuzzle(activeDiscipline, difficulty);
+    loadPuzzle(activeDiscipline, difficulty, activeSubDomain, activeLanguage);
   }, []);
 
   const handleDisciplineChange = (d: string) => {
     if (evaluating || isLoading) return;
     setActiveDiscipline(d);
-    loadPuzzle(d, difficulty);
+    setActiveSubDomain(null);
+    setActiveLanguage(null);
+    loadPuzzle(d, difficulty, null, null);
   };
 
   const submitAnswer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!userAnswer.trim() || !currentPuzzle || evaluating) return;
 
+    const capturedElapsed = elapsedMs;
     setEvaluating(true);
     try {
       const res = await evaluateAnswer(currentPuzzle, userAnswer);
+      if (timerMode === 'stopwatch') {
+        setTimeHistory(h => [...h, capturedElapsed]);
+      }
       setEvalResult(res);
       if (res.isCorrect) {
         setScore(s => s + difficulty * 10);
-        setDifficulty(d => Math.min(10, d + 1));
+        if (!difficultyPinned) setDifficulty(d => Math.min(10, d + 1));
+        setStreak(s => {
+          const next = s + 1;
+          setBestStreak(b => Math.max(b, next));
+          return next;
+        });
       } else {
-        setDifficulty(d => Math.max(1, d - 1));
+        if (!difficultyPinned) setDifficulty(d => Math.max(1, d - 1));
+        setStreak(0);
       }
     } catch (err) {
       console.error(err);
@@ -70,20 +176,28 @@ export default function App() {
   };
 
   const nextPuzzle = () => {
-    loadPuzzle(activeDiscipline, difficulty);
+    loadPuzzle(activeDiscipline, difficulty, activeSubDomain, activeLanguage);
   };
+
+  const subDomains = SUB_DOMAINS[activeDiscipline] ?? [];
+  const avgTime = timeHistory.length > 0
+    ? timeHistory.reduce((a, b) => a + b, 0) / timeHistory.length
+    : 0;
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row w-full max-w-full m-0 p-0 overflow-hidden bg-[#050505] text-[#E0E0E0] font-sans selection:bg-[#4ADE80]/30 selection:text-white">
+
       {/* Sidebar */}
-      <aside className="w-full md:w-[380px] border-b md:border-b-0 md:border-r border-white/10 p-10 flex flex-col gap-8 bg-[#070708]">
+      <aside className="w-full md:w-[380px] border-b md:border-b-0 md:border-r border-white/10 p-8 flex flex-col gap-7 bg-[#070708] overflow-y-auto terminal-scroll">
+
         <div>
           <h1 className="text-4xl font-serif italic text-white/90 mb-2">Crucible</h1>
-          <div className="text-[10px] text-white/40 font-mono tracking-[0.2em] uppercase">Session ID: {activeDiscipline.substring(0,3).toUpperCase()}-882</div>
+          <div className="text-[10px] text-white/40 font-mono tracking-[0.2em] uppercase">Session ID: {activeDiscipline.substring(0, 3).toUpperCase()}-882</div>
         </div>
 
-        <div className="flex flex-col gap-2">
-          <div className="text-[10px] text-white/40 font-mono tracking-[0.2em] uppercase mb-4">Select Discipline</div>
+        {/* Discipline selector */}
+        <div className="flex flex-col gap-1.5">
+          <div className="text-[10px] text-white/40 font-mono tracking-[0.2em] uppercase mb-2">Discipline</div>
           {DISCIPLINES.map(d => {
             const Icon = d.icon;
             const active = activeDiscipline === d.id;
@@ -92,32 +206,160 @@ export default function App() {
                 key={d.id}
                 onClick={() => handleDisciplineChange(d.id)}
                 disabled={isLoading || evaluating}
-                className={`flex items-center gap-3 px-4 py-3 text-[11px] font-mono tracking-[0.3em] uppercase transition-all border ${active ? 'border-white/20 bg-white/5 text-[#4ADE80]' : 'border-transparent text-white/40 hover:bg-white/5 hover:text-white/80'}`}
+                className={`flex items-center gap-3 px-4 py-2.5 text-[11px] font-mono tracking-[0.3em] uppercase transition-all border ${active ? 'border-white/20 bg-white/5 text-[#4ADE80]' : 'border-transparent text-white/40 hover:bg-white/5 hover:text-white/80'}`}
               >
-                <Icon size={14} className={active ? d.color : 'opacity-60'} />
+                <Icon size={13} className={active ? d.color : 'opacity-50'} />
                 {d.id}
               </button>
-            )
+            );
           })}
         </div>
 
-        <div className="mt-auto flex flex-col gap-6">
-          <div className="p-5 bg-white/5 rounded-sm border border-white/10">
-            <div className="text-[10px] uppercase font-bold text-white/60 mb-2 tracking-widest">Clearance Level</div>
+        {/* Sub-domains */}
+        {subDomains.length > 0 && (
+          <div>
+            <div className="text-[10px] text-white/40 font-mono tracking-[0.2em] uppercase mb-2">Sub-Domain</div>
+            <div className="flex flex-wrap gap-1.5">
+              {subDomains.map(sd => (
+                <button
+                  key={sd.id}
+                  onClick={() => {
+                    if (isLoading || evaluating) return;
+                    const next = activeSubDomain === sd.id ? null : sd.id;
+                    setActiveSubDomain(next);
+                    loadPuzzle(activeDiscipline, difficulty, next, activeLanguage);
+                  }}
+                  disabled={isLoading || evaluating}
+                  className={`px-2.5 py-1 text-[10px] font-mono tracking-[0.12em] uppercase border transition-all ${activeSubDomain === sd.id ? 'border-[#4ADE80]/50 bg-[#4ADE80]/10 text-[#4ADE80]' : 'border-white/10 text-white/35 hover:border-white/25 hover:text-white/65'}`}
+                >
+                  {sd.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Language selector (Software only) */}
+        {activeDiscipline === 'Software' && (
+          <div>
+            <div className="text-[10px] text-white/40 font-mono tracking-[0.2em] uppercase mb-2">Language</div>
+            <div className="flex flex-wrap gap-1.5">
+              {LANGUAGES.map(lang => (
+                <button
+                  key={lang}
+                  onClick={() => {
+                    if (isLoading || evaluating) return;
+                    const next = activeLanguage === lang ? null : lang;
+                    setActiveLanguage(next);
+                    loadPuzzle(activeDiscipline, difficulty, activeSubDomain, next);
+                  }}
+                  disabled={isLoading || evaluating}
+                  className={`px-2.5 py-1 text-[10px] font-mono tracking-[0.12em] border transition-all ${activeLanguage === lang ? 'border-[#60A5FA]/50 bg-[#60A5FA]/10 text-[#60A5FA]' : 'border-white/10 text-white/35 hover:border-white/25 hover:text-white/65'}`}
+                >
+                  {lang}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Timer controls */}
+        <div>
+          <div className="text-[10px] text-white/40 font-mono tracking-[0.2em] uppercase mb-2">Timer</div>
+          <div className="flex gap-1.5 mb-2">
+            {(['none', 'countdown', 'stopwatch'] as TimerMode[]).map(mode => (
+              <button
+                key={mode}
+                onClick={() => setTimerMode(mode)}
+                className={`flex-1 py-2 text-[10px] font-mono tracking-[0.1em] uppercase border transition-all ${timerMode === mode ? 'border-white/30 bg-white/8 text-white/90' : 'border-white/10 text-white/35 hover:border-white/20 hover:text-white/60'}`}
+              >
+                {mode === 'none' ? 'Off' : mode === 'countdown' ? 'Count' : 'Watch'}
+              </button>
+            ))}
+          </div>
+
+          {timerMode === 'countdown' && (
+            <div className="flex gap-1.5 mb-2">
+              {([30, 60, 90] as const).map(dur => (
+                <button
+                  key={dur}
+                  onClick={() => setCountdownDuration(dur)}
+                  className={`flex-1 py-1.5 text-[10px] font-mono border transition-all ${countdownDuration === dur ? 'border-[#F87171]/50 bg-[#F87171]/10 text-[#F87171]' : 'border-white/10 text-white/35 hover:border-white/20'}`}
+                >
+                  {dur}s
+                </button>
+              ))}
+            </div>
+          )}
+
+          {timerMode !== 'none' && currentPuzzle && !isLoading && (
+            <div className="flex items-center gap-3 p-3 bg-white/5 border border-white/10">
+              {timerMode === 'countdown' ? (
+                <>
+                  <Timer size={13} className={timeLeft !== null && timeLeft <= 10 ? 'text-[#F87171]' : 'text-white/40'} />
+                  <span className={`font-mono text-xl tabular-nums ${timeLeft !== null && timeLeft <= 10 ? 'text-[#F87171]' : 'text-white/80'}`}>
+                    {timeLeft !== null ? `${timeLeft}s` : '—'}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Clock size={13} className="text-white/40" />
+                  <span className="font-mono text-xl tabular-nums text-white/80">{formatTime(elapsedMs)}</span>
+                  {timeHistory.length > 0 && (
+                    <span className="text-[10px] text-white/40 font-mono ml-auto">avg {formatTime(avgTime)}</span>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Stats */}
+        <div className="mt-auto flex flex-col gap-3">
+
+          {/* Streak */}
+          <div className="p-4 bg-white/5 border border-white/10 flex items-center justify-between">
+            <div>
+              <div className="text-[10px] uppercase font-bold text-white/50 mb-1 tracking-widest">Streak</div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xl font-mono text-[#FBBF24]">{streak}</span>
+                {streak >= 3 && <Flame size={13} className="text-[#FBBF24]" />}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-[10px] uppercase font-bold text-white/30 mb-1 tracking-widest">Best</div>
+              <span className="text-xl font-mono text-white/35">{bestStreak}</span>
+            </div>
+          </div>
+
+          {/* Clearance Level */}
+          <div className="p-4 bg-white/5 border border-white/10">
+            <div className="flex items-center justify-between mb-1">
+              <div className="text-[10px] uppercase font-bold text-white/50 tracking-widest">Clearance Level</div>
+              <button
+                onClick={() => setDifficultyPinned(p => !p)}
+                title={difficultyPinned ? 'Unpin difficulty' : 'Pin difficulty'}
+                className={`transition-colors ${difficultyPinned ? 'text-[#FBBF24]' : 'text-white/20 hover:text-white/50'}`}
+              >
+                {difficultyPinned ? <Lock size={12} /> : <Unlock size={12} />}
+              </button>
+            </div>
             <div className="text-2xl font-mono text-[#4ADE80] flex items-baseline gap-1">
               {difficulty}<span className="text-xs text-white/40">/ 10</span>
             </div>
           </div>
-          
-          <div className="p-5 bg-white/5 rounded-sm border border-white/10 relative overflow-hidden">
-            <div className="absolute top-0 right-0 p-4 opacity-[0.03]">
-              <Activity size={48} />
+
+          {/* Score */}
+          <div className="p-4 bg-white/5 border border-white/10 relative overflow-hidden">
+            <div className="absolute top-0 right-0 p-3 opacity-[0.03]">
+              <Activity size={44} />
             </div>
-            <div className="text-[10px] uppercase font-bold text-white/60 mb-2 tracking-widest relative z-10">Intelligence Quotient</div>
+            <div className="text-[10px] uppercase font-bold text-white/50 mb-1 tracking-widest relative z-10">Intelligence Quotient</div>
             <div className="text-2xl font-mono text-[#60A5FA] flex items-baseline gap-2 relative z-10">
               {score}<span className="text-[11px] text-white/40">pts</span>
             </div>
           </div>
+
         </div>
       </aside>
 
@@ -130,13 +372,20 @@ export default function App() {
           </div>
         ) : currentPuzzle ? (
           <div className="w-full max-w-4xl flex flex-col gap-8 pb-32">
-            
+
             {/* Header */}
-            <div className="flex items-start justify-between border-b border-white/10 pb-6">
-              <div>
-                <div className="text-[10px] text-[#F87171] font-mono tracking-[0.2em] uppercase mb-4">INCIDENT REPORT #{currentPuzzle.id}</div>
-                <h2 className="text-4xl font-serif leading-tight text-white mb-2">{currentPuzzle.title}</h2>
+            <div className="border-b border-white/10 pb-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="text-[10px] text-[#F87171] font-mono tracking-[0.2em] uppercase">
+                  INCIDENT REPORT #{currentPuzzle.id}
+                </div>
+                {currentPuzzle.questionType && QUESTION_TYPE_STYLES[currentPuzzle.questionType] && (
+                  <span className={`text-[10px] font-mono tracking-[0.15em] uppercase px-2 py-0.5 border ${QUESTION_TYPE_STYLES[currentPuzzle.questionType].color}`}>
+                    {QUESTION_TYPE_STYLES[currentPuzzle.questionType].label}
+                  </span>
+                )}
               </div>
+              <h2 className="text-4xl font-serif leading-tight text-white">{currentPuzzle.title}</h2>
             </div>
 
             {/* Scenario */}
@@ -165,16 +414,16 @@ export default function App() {
                 <label className="text-[10px] text-white/40 font-mono tracking-[0.2em] uppercase mb-2">DEBUGGER_CONSOLE_V4.0</label>
                 <div className="flex gap-4 relative bg-[#0A0A0C] border border-white/10 p-2 rounded-sm focus-within:border-white/30 transition-colors">
                   <span className="absolute left-6 top-1/2 -translate-y-1/2 font-mono text-[#4ADE80]">{'>'}</span>
-                  <input 
-                    type="text" 
+                  <input
+                    type="text"
                     value={userAnswer}
                     onChange={(e) => setUserAnswer(e.target.value)}
                     disabled={evaluating || !!evalResult}
                     placeholder="awaiting engineer input..."
                     className="flex-1 bg-transparent pl-10 pr-4 py-3 font-mono text-[13px] focus:outline-none focus:text-[#4ADE80] text-white/90 disabled:opacity-50 placeholder:text-white/30"
                   />
-                  <button 
-                    type="submit" 
+                  <button
+                    type="submit"
                     disabled={!userAnswer.trim() || evaluating || !!evalResult}
                     className="px-8 py-3 bg-white/5 border border-white/10 hover:border-white/50 hover:bg-white/10 text-white/90 font-mono uppercase tracking-[0.2em] text-[10px] transition-all disabled:opacity-50 flex items-center justify-center min-w-[140px] group"
                   >
@@ -202,7 +451,7 @@ export default function App() {
                     <h3 className={`font-mono text-[11px] uppercase tracking-[0.3em] font-bold ${evalResult.isCorrect ? 'text-[#4ADE80]' : 'text-[#F87171]'}`}>
                       {evalResult.isCorrect ? '[SUCCESS] ANALYSIS ACCEPTED' : '[ERR] ANALYSIS REJECTED'}
                     </h3>
-                    
+
                     <div className="text-[15px] font-light leading-relaxed text-white/80">
                       {evalResult.feedback}
                     </div>
@@ -213,7 +462,7 @@ export default function App() {
                         <span className="text-[#4ADE80] bg-[#4ADE80]/10 px-2 py-1 rounded-sm">{currentPuzzle.correctAnswer}</span>
                       </div>
                     )}
-                    
+
                     <div className="mt-2 pt-5 border-t border-white/5 space-y-3">
                       <span className="text-[10px] uppercase tracking-[0.2em] text-white/40 block">Post-Mortem Analysis</span>
                       <div className="text-[13px] italic font-serif text-white/60 leading-relaxed">
@@ -221,7 +470,7 @@ export default function App() {
                       </div>
                     </div>
 
-                    <button 
+                    <button
                       onClick={nextPuzzle}
                       className="mt-8 self-start flex items-center gap-3 px-8 py-4 bg-white/5 border border-white/10 hover:border-white/50 text-[10px] uppercase tracking-[0.3em] transition-all text-white/90 group rounded-sm"
                     >
@@ -232,12 +481,17 @@ export default function App() {
                 </div>
               </div>
             )}
-            
+
           </div>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-[#F87171] font-mono text-sm tracking-widest uppercase">
             [ERR] FAILED TO LOAD SCENARIO.
-            <button onClick={() => loadPuzzle(activeDiscipline, difficulty)} className="mt-6 px-6 py-3 border border-white/20 hover:border-white/50 text-white/80 text-[10px] tracking-[0.2em]">RETRY CONNECTION</button>
+            <button
+              onClick={() => loadPuzzle(activeDiscipline, difficulty, activeSubDomain, activeLanguage)}
+              className="mt-6 px-6 py-3 border border-white/20 hover:border-white/50 text-white/80 text-[10px] tracking-[0.2em]"
+            >
+              RETRY CONNECTION
+            </button>
           </div>
         )}
       </main>

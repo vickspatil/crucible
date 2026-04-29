@@ -2,6 +2,8 @@ import { CohereClientV2 } from 'cohere-ai';
 
 const cohere = new CohereClientV2({ token: process.env.COHERE_API_KEY });
 
+export type QuestionType = 'root-cause' | 'code-review' | 'math' | 'design' | 'trace' | 'exploit';
+
 export interface Puzzle {
   id: string;
   discipline: string;
@@ -12,6 +14,7 @@ export interface Puzzle {
   correctAnswer: string;
   acceptableAnswers: string[];
   explanation: string;
+  questionType?: QuestionType;
 }
 
 export interface EvaluationResult {
@@ -94,8 +97,17 @@ Return exactly this JSON object shape:
 
   return parseJsonResponse<EvaluationResult>(text);
 }
-export async function generatePuzzle(discipline: string, difficulty: number): Promise<Puzzle> {
-  const prompt = `Generate a unique, highly technical puzzle for a level ${difficulty}/10 expert in the ${discipline} engineering discipline. 
+export async function generatePuzzle(
+  discipline: string,
+  difficulty: number,
+  options?: { subDomain?: string; language?: string }
+): Promise<Puzzle> {
+  const focusLines: string[] = [];
+  if (options?.subDomain) focusLines.push(`Focus specifically on the sub-domain: ${options.subDomain}.`);
+  if (options?.language) focusLines.push(`Use ${options.language} code and idioms exclusively in the technical data and scenario.`);
+
+  const prompt = `Generate a unique, highly technical puzzle for a level ${difficulty}/10 expert in the ${discipline} engineering discipline.
+${focusLines.join('\n')}
 The scenario should mimic a real-world problem or emergency.
 Do not make it a generic trivia question. Provide specific technical data (logs, code, spec tables) that the engineer must analyze to find a specific root cause or desired value.
 The answer should be a specific succinct string, number, or identifier. It should not be an open-ended essay.`;
@@ -121,7 +133,8 @@ Return exactly this JSON object shape:
   "question": string,
   "correctAnswer": string,
   "acceptableAnswers": string[],
-  "explanation": string
+  "explanation": string,
+  "questionType": one of ["root-cause", "code-review", "math", "design", "trace", "exploit"]
 }`
       }
     ]
@@ -129,7 +142,7 @@ Return exactly this JSON object shape:
 
   const text = extractText(response);
   if (!text) throw new Error("Failed to generate puzzle");
-  
+
   const data = parseJsonResponse<Omit<Puzzle, 'id' | 'discipline'>>(text);
   return {
     id: Math.random().toString(36).substring(2, 9),
